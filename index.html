@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>五子棋</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: #1a1a2e;
+  font-family: -apple-system, "Microsoft YaHei", sans-serif;
+  color: #eee;
+}
+h1 { font-size: 28px; margin-bottom: 12px; letter-spacing: 2px; }
+#status {
+  font-size: 18px;
+  margin-bottom: 10px;
+  min-height: 28px;
+  color: #ccc;
+}
+#status .win { color: #ffd700; font-weight: bold; }
+canvas {
+  cursor: pointer;
+  border-radius: 8px;
+  box-shadow: 0 0 30px rgba(0,0,0,0.5);
+}
+.controls {
+  margin-top: 14px;
+  display: flex;
+  gap: 12px;
+}
+.controls button {
+  padding: 8px 22px;
+  font-size: 15px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: #16213e;
+  color: #eee;
+  border: 1px solid #444;
+  transition: background 0.2s;
+}
+.controls button:hover { background: #0f3460; }
+.controls button:active { background: #1a1a5e; }
+.controls button.primary { background: #e94560; border-color: #e94560; }
+.controls button.primary:hover { background: #c73e54; }
+.footer {
+  margin-top: 14px;
+  font-size: 12px;
+  color: #666;
+}
+</style>
+</head>
+<body>
+
+<h1>五子棋</h1>
+<div id="status"><span id="status-icon">●</span> 黑棋（你）的回合</div>
+<canvas id="board"></canvas>
+<div class="controls">
+  <button class="primary" onclick="newGame()">新游戏</button>
+  <button onclick="undoMove()">悔棋</button>
+</div>
+<div class="footer">点击棋盘落子 · 黑棋先手 · 五子连珠获胜</div>
+
+<script>
+const SIZE = 15;
+const CELL = 38;
+const PAD = 28;
+const RADIUS = 15;
+const CANVAS_SIZE = PAD * 2 + CELL * (SIZE - 1);
+
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+
+let dpr = window.devicePixelRatio || 1;
+canvas.width = CANVAS_SIZE * dpr;
+canvas.height = CANVAS_SIZE * dpr;
+canvas.style.width = CANVAS_SIZE + 'px';
+canvas.style.height = CANVAS_SIZE + 'px';
+ctx.scale(dpr, dpr);
+
+let boardState = [];
+let currentStone = 'black';
+let gameOver = false;
+let hoverX = -1;
+let hoverY = -1;
+let pending = false;
+
+function posToXY(col, row) {
+  return [PAD + col * CELL, PAD + row * CELL];
+}
+
+function drawBoard() {
+  ctx.fillStyle = '#c8a96e';
+  ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < SIZE; i++) {
+    const [x1, y1] = posToXY(i, 0);
+    const [x2, y2] = posToXY(i, SIZE - 1);
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    const [x3, y3] = posToXY(0, i);
+    const [x4, y4] = posToXY(SIZE - 1, i);
+    ctx.beginPath(); ctx.moveTo(x3, y3); ctx.lineTo(x4, y4); ctx.stroke();
+  }
+
+  ctx.fillStyle = '#333';
+  const dots = [3, 7, 11];
+  for (const r of dots) {
+    for (const c of dots) {
+      const [x, y] = posToXY(c, r);
+      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  ctx.fillStyle = '#5a3e1b';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < SIZE; i++) {
+    const label = String.fromCharCode(65 + i);
+    const [x0] = posToXY(i, 0);
+    const [, y0] = posToXY(0, 0);
+    const [, yLast] = posToXY(0, SIZE - 1);
+    ctx.fillText(label, x0, y0 - 16);
+    ctx.fillText(label, x0, yLast + 16);
+  }
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < SIZE; i++) {
+    const [, y] = posToXY(0, i);
+    const [x0] = posToXY(0, 0);
+    const [xLast] = posToXY(SIZE - 1, 0);
+    ctx.fillText(String(i + 1), x0 - 10, y);
+    ctx.textAlign = 'left';
+    ctx.fillText(String(i + 1), xLast + 10, y);
+    ctx.textAlign = 'right';
+  }
+}
+
+function drawStones() {
+  let lastMove = null;
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      if (boardState[y] && boardState[y][x] !== 0) {
+        drawStone(x, y, boardState[y][x] === 1 ? 'black' : 'white', false);
+      }
+    }
+  }
+}
+
+function drawStone(col, row, stone, isLast) {
+  const [cx, cy] = posToXY(col, row);
+
+  if (stone === 'black') {
+    const grad = ctx.createRadialGradient(cx - 3, cy - 3, 2, cx, cy, RADIUS);
+    grad.addColorStop(0, '#555');
+    grad.addColorStop(1, '#000');
+    ctx.fillStyle = grad;
+  } else {
+    const grad = ctx.createRadialGradient(cx - 3, cy - 3, 2, cx, cy, RADIUS);
+    grad.addColorStop(0, '#fff');
+    grad.addColorStop(1, '#ccc');
+    ctx.fillStyle = grad;
+  }
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (isLast) {
+    ctx.strokeStyle = stone === 'black' ? '#ffd700' : '#ff4500';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+function drawHover() {
+  if (hoverX < 0 || hoverY < 0 || !boardState[hoverY] || boardState[hoverY][hoverX] !== 0 || gameOver || currentStone !== 'black') return;
+  const [cx, cy] = posToXY(hoverX, hoverY);
+  ctx.globalAlpha = 0.4;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(cx, cy, RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function render() {
+  drawBoard();
+  drawStones();
+  drawHover();
+}
+
+function setStatus(icon, text) {
+  statusEl.innerHTML = `<span id="status-icon">${icon}</span> ${text}`;
+}
+
+function setStatusHtml(html) {
+  statusEl.innerHTML = html;
+}
+
+async function fetchJSON(url, opts) {
+  const res = await fetch(url, opts);
+  return res.json();
+}
+
+function applyState(data) {
+  if (!data.ok) {
+    alert(data.error);
+    return;
+  }
+  boardState = data.board;
+  currentStone = data.current_player;
+  gameOver = data.game_over;
+  if (data.winner) {
+    const name = data.winner === 'black' ? '● 黑棋（你）' : '○ 白棋（AI）';
+    setStatusHtml(`<span class="win">${name} 获胜！</span>`);
+  } else if (data.game_over) {
+    setStatusHtml('<span class="win">平局！</span>');
+  } else if (data.message) {
+    setStatus(currentStone === 'black' ? '●' : '○', data.message);
+  } else {
+    const name = currentStone === 'black' ? '黑棋（你）' : '白棋（AI）';
+    const icon = currentStone === 'black' ? '●' : '○';
+    setStatus(icon, `${name}的回合`);
+  }
+  render();
+}
+
+async function init() {
+  const data = await fetchJSON('/api/state');
+  applyState(data);
+}
+
+async function handleClick(e) {
+  if (gameOver || currentStone !== 'black' || pending) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  let bestDist = Infinity;
+  let bestCol = -1, bestYIdx = -1;
+
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const [cx, cy] = posToXY(x, y);
+      const d = Math.hypot(mx - cx, my - cy);
+      if (d < bestDist && d < CELL * 0.6) {
+        bestDist = d;
+        bestCol = x;
+        bestYIdx = y;
+      }
+    }
+  }
+
+  if (bestCol < 0 || !boardState[bestYIdx] || boardState[bestYIdx][bestCol] !== 0) return;
+
+  pending = true;
+  setStatus('⏳', '你落子中...');
+  render();
+
+  const data = await fetchJSON('/api/move', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ x: bestCol, y: bestYIdx }),
+  });
+
+  pending = false;
+  applyState(data);
+}
+
+function handleCanvasMove(e) {
+  if (gameOver || currentStone !== 'black') { hoverX = -1; hoverY = -1; render(); return; }
+
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  let bestDist = Infinity;
+  let bestCol = -1, bestYIdx = -1;
+
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const [cx, cy] = posToXY(x, y);
+      const d = Math.hypot(mx - cx, my - cy);
+      if (d < bestDist && d < CELL * 0.6) {
+        bestDist = d;
+        bestCol = x;
+        bestYIdx = y;
+      }
+    }
+  }
+
+  if (bestCol >= 0 && boardState[bestYIdx] && boardState[bestYIdx][bestCol] === 0) {
+    if (hoverX !== bestCol || hoverY !== bestYIdx) {
+      hoverX = bestCol;
+      hoverY = bestYIdx;
+      render();
+    }
+  } else {
+    if (hoverX !== -1) {
+      hoverX = -1;
+      hoverY = -1;
+      render();
+    }
+  }
+}
+
+function handleCanvasLeave() {
+  hoverX = -1;
+  hoverY = -1;
+  render();
+}
+
+canvas.addEventListener('click', handleClick);
+canvas.addEventListener('mousemove', handleCanvasMove);
+canvas.addEventListener('mouseleave', handleCanvasLeave);
+
+async function undoMove() {
+  if (pending) return;
+  const data = await fetchJSON('/api/undo', { method: 'POST' });
+  applyState(data);
+}
+
+async function newGame() {
+  if (pending) return;
+  const data = await fetchJSON('/api/new-game', { method: 'POST' });
+  applyState(data);
+}
+
+init();
+</script>
+</body>
+</html>
