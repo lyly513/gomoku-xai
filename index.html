@@ -156,12 +156,11 @@ canvas {
 <body>
 
 <h1>五子棋</h1>
-
 <div id="status"><span id="status-icon">●</span> 黑棋（你）的回合</div>
 <canvas id="board"></canvas>
 <div class="controls" id="game-controls">
-  <button class="primary" onclick="newGame()">新游戏</button>
-  <button onclick="undoMove()">悔棋</button>
+  <button class="primary" onclick="newGameAI()">新游戏</button>
+  <button onclick="undoMoveAI()">悔棋</button>
 </div>
 <div class="footer">点击棋盘落子 · 黑棋先手 · 五子连珠获胜</div>
 
@@ -200,11 +199,10 @@ canvas {
     <p>将以下房间号分享给朋友</p>
     <div class="room-code" id="waiting-room-code"></div>
     <p>等待对手加入...</p>
-    <div class="back-link" onclick="leaveWaiting()">← 返回</div>
+    <div class="back-link" onclick="leaveRoom()">← 取消</div>
   </div>
 </div>
 
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
 const SIZE = 15;
 const CELL = 38;
@@ -233,9 +231,9 @@ let pending = false;
 
 let gameMode = null;
 let myColor = 'black';
-let currentRoomId = null;
-
-const socket = io();
+let playerId = null;
+let roomId = null;
+let pollTimer = null;
 
 // --- 画布绘制 ---
 function posToXY(col, row) {
@@ -328,9 +326,7 @@ function drawStone(col, row, stone, isLast) {
 }
 
 function drawHover() {
-  const canClick = gameMode === 'ai'
-    ? (currentStone === 'black' && !gameOver && !pending)
-    : (!gameOver && !pending && myColor === currentStone);
+  const canClick = !gameOver && !pending && myColor === currentStone;
   if (!canClick || hoverX < 0 || hoverY < 0 || !boardState[hoverY] || boardState[hoverY][hoverX] !== 0) return;
 
   const [cx, cy] = posToXY(hoverX, hoverY);
@@ -361,14 +357,27 @@ function showOverlay(id) {
   if (id) document.getElementById(id).classList.remove('hidden');
 }
 
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function clearSession() {
+  sessionStorage.removeItem('pvp_player_id');
+  sessionStorage.removeItem('pvp_room_id');
+}
+
 // --- UI 切换 ---
 function startAIMode() {
   gameMode = 'ai';
   myColor = 'black';
+  stopPolling();
   showOverlay(null);
   controlsEl.innerHTML = `
-    <button class="primary" onclick="newGame()">新游戏</button>
-    <button onclick="undoMove()">悔棋</button>
+    <button class="primary" onclick="newGameAI()">新游戏</button>
+    <button onclick="undoMoveAI()">悔棋</button>
   `;
   initAI();
 }
@@ -385,10 +394,11 @@ function backToModeSelect() {
 }
 
 function showJoinUI() {
-  document.getElementById('join-ui').classList.remove('hidden');
+  const ui = document.getElementById('join-ui');
+  ui.classList.toggle('hidden');
 }
 
-// --- AI 模式 ---
+// --- AI 模式 (保持原样) ---
 async function fetchJSON(url, opts) {
   const res = await fetch(url, opts);
   return res.json();
@@ -415,115 +425,155 @@ function applyAIState(data) {
   render();
 }
 
-async function undoMove() {
+async function undoMoveAI() {
   if (pending || gameMode !== 'ai') return;
   const data = await fetchJSON('/api/undo', { method: 'POST' });
   applyAIState(data);
 }
 
-async function newGame() {
+async function newGameAI() {
   if (pending || gameMode !== 'ai') return;
   const data = await fetchJSON('/api/new-game', { method: 'POST' });
   applyAIState(data);
 }
 
-// --- PvP 房间管理 ---
-function createRoom() {
-  socket.emit('room:create');
+// --- PvP 房间管理 (REST + 轮询) ---
+async function createRoom() {
+  const data = await fetchJSON('/api/pvp/create', { method: 'POST' });
+  if (!data.ok) { alert(data.error); return; }
+  playerId = data.player_id;
+  roomId = data.room_id;
+  myColor = data.color;
+  sessionStorage.setItem('pvp_player_id', playerId);
+  sessionStorage.setItem('pvp_room_id', roomId);
+  document.getElementById('waiting-room-code').textContent = roomId;
+  showOverlay('waiting');
+  startPolling();
 }
 
-socket.on('room:created', (data) => {
-  currentRoomId = data.room_id;
-  document.getElementById('waiting-room-code').textContent = currentRoomId;
-  showOverlay('waiting');
-});
-
-function joinRoom() {
+async function joinRoom() {
   const input = document.getElementById('room-input');
   const rid = input.value.trim();
-  if (rid.length !== 4) {
-    alert('请输入4位数字房间号');
-    return;
-  }
-  socket.emit('room:join', { room_id: rid });
-}
-
-function leaveWaiting() {
-  socket.disconnect();
-  socket.connect();
-  currentRoomId = null;
-  showOverlay('room-menu');
-}
-
-socket.on('game:error', (data) => {
-  alert(data.message);
-});
-
-// --- PvP 游戏流程 ---
-socket.on('game:start', (data) => {
-  currentRoomId = data.room_id || currentRoomId;
+  if (rid.length !== 4) { alert('请输入4位数字房间号'); return; }
+  const data = await fetchJSON('/api/pvp/join', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ room_id: rid }),
+  });
+  if (!data.ok) { alert(data.error); return; }
+  playerId = data.player_id;
+  roomId = rid;
   myColor = data.color;
   boardState = data.board;
   currentStone = data.current_player;
   gameOver = false;
-  pending = false;
-
-  const colorName = myColor === 'black' ? '● 黑棋' : '○ 白棋';
-  const colorCls = myColor;
-  const opponent = myColor === 'black' ? '○ 白棋' : '● 黑棋';
-
-  setStatus('●', `你执${colorName}，对手执${opponent}`);
-  controlsEl.innerHTML = '';
+  sessionStorage.setItem('pvp_player_id', playerId);
+  sessionStorage.setItem('pvp_room_id', roomId);
 
   showOverlay(null);
-
+  const colorName = myColor === 'black' ? '● 黑棋' : '○ 白棋';
+  setStatus('●', `你执${colorName}，黑棋先手`);
   controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
   render();
-});
+  startPolling();
+}
 
-socket.on('game:moved', (data) => {
-  boardState = data.board;
-  gameOver = data.game_over;
-  currentStone = data.current_player;
-  pending = false;
-
-  if (data.winner) {
-    const winName = data.winner === 'black' ? '● 黑棋' : '○ 白棋';
-    const youWin = data.winner === myColor;
-    if (youWin) {
-      setStatusHtml(`<span class="win">${winName}（你）获胜！</span>`);
-    } else {
-      setStatusHtml(`<span class="win">${winName}（对手）获胜！</span>`);
-    }
-    controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
-  } else if (data.game_over) {
-    setStatusHtml('<span class="win">平局！</span>');
-    controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
-  } else {
-    const turn = myColor === currentStone ? '你的回合' : '对手回合';
-    const icon = currentStone === 'black' ? '●' : '○';
-    const colorName = currentStone === 'black' ? '黑棋' : '白棋';
-    setStatus(icon, `${colorName} - ${turn}`);
+function leaveRoom() {
+  if (playerId) {
+    navigator.sendBeacon('/api/pvp/leave?player_id=' + playerId);
   }
-  render();
-});
+  cleanupPvP();
+  showOverlay('room-menu');
+}
 
-socket.on('room:opponent_left', () => {
-  gameOver = true;
-  setStatusHtml('<span class="win">对手已离开</span>');
-  controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
-  render();
-});
+async function leaveGame() {
+  if (playerId) {
+    await fetch('/api/pvp/leave', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_id: playerId }),
+    });
+  }
+  cleanupPvP();
+  showOverlay('mode-select');
+}
 
-function leaveGame() {
-  socket.disconnect();
-  socket.connect();
-  currentRoomId = null;
-  gameMode = null;
+function cleanupPvP() {
+  stopPolling();
+  clearSession();
+  playerId = null;
+  roomId = null;
   myColor = 'black';
   boardState = [];
+  gameMode = null;
   gameOver = false;
-  showOverlay('mode-select');
+}
+
+// --- 轮询 ---
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(async () => {
+    if (!playerId) { stopPolling(); return; }
+    try {
+      const data = await fetchJSON('/api/pvp/state?player_id=' + playerId);
+      if (!data.ok) {
+        if (data.inactive) {
+          stopPolling();
+          gameOver = true;
+          setStatusHtml('<span class="win">对局已结束</span>');
+          controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
+          render();
+        }
+        return;
+      }
+
+      boardState = data.board;
+      currentStone = data.current_player;
+      if (data.game_over) gameOver = true;
+
+      let reRender = false;
+
+      if (data.events && data.events.length > 0) {
+        for (const evt of data.events) {
+          if (evt.type === 'opponent_joined') {
+            showOverlay(null);
+            const colorName = myColor === 'black' ? '● 黑棋' : '○ 白棋';
+            setStatus('●', `你执${colorName}，黑棋先手`);
+            controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
+            reRender = true;
+          } else if (evt.type === 'opponent_left') {
+            gameOver = true;
+            setStatusHtml('<span class="win">对手已离开</span>');
+            stopPolling();
+            reRender = true;
+          }
+        }
+      }
+
+      if (data.game_over) {
+        if (data.winner) {
+          const winName = data.winner === 'black' ? '● 黑棋' : '○ 白棋';
+          const youWin = data.winner === myColor;
+          setStatusHtml(`<span class="win">${winName}${youWin ? '（你）' : '（对手）'}获胜！</span>`);
+        } else {
+          setStatusHtml('<span class="win">平局！</span>');
+        }
+        controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
+        stopPolling();
+        reRender = true;
+      } else if (!data.game_over && !data.winner) {
+        const isMyTurn = myColor === currentStone;
+        const icon = currentStone === 'black' ? '●' : '○';
+        const colorName = currentStone === 'black' ? '黑棋' : '白棋';
+        setStatus(icon, `${colorName} — ${isMyTurn ? '你的回合' : '对手回合'}`);
+      }
+
+      if (reRender) render();
+      else render();
+    } catch (e) {
+      // ignore poll errors
+    }
+  }, 1000);
 }
 
 // --- 点击落子 ---
@@ -555,8 +605,16 @@ async function handleClick(e) {
     if (myColor !== currentStone) return;
     pending = true;
     render();
-    socket.emit('game:move', { x: bestCol, y: bestYIdx });
-  } else {
+    const data = await fetchJSON('/api/pvp/move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_id: playerId, x: bestCol, y: bestYIdx }),
+    });
+    if (!data.ok) {
+      alert(data.error || '落子失败');
+    }
+    pending = false;
+  } else if (gameMode === 'ai') {
     if (currentStone !== 'black') return;
     pending = true;
     setStatus('⏳', '你落子中...');
@@ -572,9 +630,7 @@ async function handleClick(e) {
 }
 
 function handleCanvasMove(e) {
-  const canHover = gameMode === 'ai'
-    ? (currentStone === 'black' && !gameOver && !pending)
-    : (!gameOver && !pending && myColor === currentStone);
+  const canHover = !gameOver && !pending && myColor === currentStone;
   if (!canHover) { hoverX = -1; hoverY = -1; render(); return; }
 
   const rect = canvas.getBoundingClientRect();
@@ -613,7 +669,47 @@ canvas.addEventListener('click', handleClick);
 canvas.addEventListener('mousemove', handleCanvasMove);
 canvas.addEventListener('mouseleave', handleCanvasLeave);
 
-showOverlay('mode-select');
+// 页面关闭时通知服务器
+window.addEventListener('beforeunload', () => {
+  if (playerId) {
+    navigator.sendBeacon('/api/pvp/leave?player_id=' + playerId);
+  }
+});
+
+// 初始化：检查是否有未完成的 PvP 对局
+async function init() {
+  const savedPlayerId = sessionStorage.getItem('pvp_player_id');
+  if (savedPlayerId) {
+    const data = await fetchJSON('/api/pvp/state?player_id=' + savedPlayerId);
+    if (data.ok) {
+      playerId = savedPlayerId;
+      roomId = sessionStorage.getItem('pvp_room_id');
+      myColor = data.color;
+      boardState = data.board;
+      currentStone = data.current_player;
+      gameOver = data.game_over;
+      gameMode = 'pvp';
+      showOverlay(null);
+      if (data.game_over && data.winner) {
+        const winName = data.winner === 'black' ? '● 黑棋' : '○ 白棋';
+        const youWin = data.winner === myColor;
+        setStatusHtml(`<span class="win">${winName}${youWin ? '（你）' : '（对手）'}获胜！</span>`);
+      } else {
+        const isMyTurn = myColor === currentStone;
+        const icon = currentStone === 'black' ? '●' : '○';
+        setStatus(icon, isMyTurn ? '你的回合' : '对手回合');
+      }
+      controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
+      render();
+      startPolling();
+      return;
+    }
+    clearSession();
+  }
+  showOverlay('mode-select');
+}
+
+init();
 </script>
 </body>
 </html>

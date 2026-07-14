@@ -1,11 +1,9 @@
 import uuid
 from flask import Flask, request, jsonify, send_from_directory
-from flask_socketio import SocketIO, emit, join_room
-from game.game import Game, BLACK
+from game.game import Game, BLACK, WHITE
 from room.room_manager import RoomManager
 
 app = Flask(__name__, static_folder=".")
-socketio = SocketIO(app, cors_allowed_origins="*")
 room_manager = RoomManager()
 
 games = {}
@@ -43,9 +41,8 @@ def new_game():
 @app.route("/api/move", methods=["POST"])
 def move():
     data = request.get_json()
-    x, y = data["x"], data["y"]
     game, gid = get_game()
-    result = game.human_move(x, y)
+    result = game.human_move(data["x"], data["y"])
     resp = jsonify(result)
     resp.set_cookie("game_id", gid)
     return resp
@@ -60,82 +57,88 @@ def undo():
     return resp
 
 
-@socketio.on("connect")
-def handle_connect():
-    pass
+@app.route("/api/pvp/create", methods=["POST"])
+def pvp_create():
+    player_id = uuid.uuid4().hex
+    rid = room_manager.create_room(player_id)
+    return jsonify({"ok": True, "player_id": player_id, "room_id": rid, "color": "black"})
 
 
-@socketio.on("disconnect")
-def handle_disconnect():
-    sid = request.sid
-    other_sid = room_manager.leave_room(sid)
-    if other_sid:
-        emit("room:opponent_left", to=other_sid)
-
-
-@socketio.on("room:create")
-def handle_create():
-    sid = request.sid
-    rid = room_manager.create_room(sid)
-    emit("room:created", {"room_id": rid})
-
-
-@socketio.on("room:join")
-def handle_join(data):
-    sid = request.sid
+@app.route("/api/pvp/join", methods=["POST"])
+def pvp_join():
+    data = request.get_json()
     rid = data.get("room_id", "").strip()
-    if not rid:
-        emit("game:error", {"message": "请输入房间号"})
-        return
-    room, error = room_manager.join_room(rid, sid)
+    if not rid or len(rid) != 4:
+        return jsonify({"ok": False, "error": "房间号格式错误"})
+    player_id = uuid.uuid4().hex
+    room, error = room_manager.join_room(rid, player_id)
     if error:
-        emit("game:error", {"message": error})
-        return
-
-    join_room(rid, sid=room.player_black)
-    join_room(rid, sid=room.player_white)
-
-    board = room.game.board.to_list()
-    emit("game:start", {
-        "board": board,
-        "color": "black",
-        "current_player": "black"
-    }, to=room.player_black)
-    emit("game:start", {
-        "board": board,
+        return jsonify({"ok": False, "error": error})
+    return jsonify({
+        "ok": True,
+        "player_id": player_id,
         "color": "white",
-        "current_player": "black"
-    }, to=room.player_white)
+        "board": room.game.board.to_list(),
+        "current_player": "black",
+        "game_over": False,
+        "winner": None,
+    })
 
 
-@socketio.on("game:move")
-def handle_move(data):
-    sid = request.sid
-    room = room_manager.get_room_by_sid(sid)
+@app.route("/api/pvp/state", methods=["GET"])
+def pvp_state():
+    player_id = request.args.get("player_id")
+    if not player_id:
+        return jsonify({"ok": False, "error": "参数缺失"})
+    room = room_manager.get_room_by_player(player_id)
     if not room:
-        emit("game:error", {"message": "不在游戏中"})
-        return
+        return jsonify({"ok": False, "inactive": True, "error": "房间不存在或游戏已结束"})
+    color = "black" if room.player_black == player_id else "white"
+    events = room_manager.poll_events(room, color)
+    return jsonify({
+        "ok": True,
+        "color": color,
+        "board": room.game.board.to_list(),
+        "current_player": "black" if room.game.current_player == BLACK else "white",
+        "game_over": room.game.game_over,
+        "winner": room.game.winner,
+        "status": room.status,
+        "events": events,
+    })
 
-    from game.board import WHITE
-    player = BLACK if sid == room.player_black else WHITE
+
+@app.route("/api/pvp/move", methods=["POST"])
+def pvp_move():
+    data = request.get_json()
+    player_id = data.get("player_id")
+    room = room_manager.get_room_by_player(player_id)
+    if not room:
+        return jsonify({"ok": False, "error": "房间不存在"})
+
+    player = BLACK if room.player_black == player_id else WHITE
     result = room.game.pvp_move(data["x"], data["y"], player)
-
     if not result["ok"]:
-        emit("game:error", {"message": result["error"]})
-        return
+        return jsonify(result)
 
-    rid = room.room_id
-    emit("game:moved", {
-        "x": data["x"],
-        "y": data["y"],
-        "stone": "black" if player == BLACK else "white",
-        "board": result["board"],
-        "game_over": result["game_over"],
-        "winner": result["winner"],
-        "current_player": result["current_player"],
-        "message": result["message"],
-    }, room=rid)
+    target_color = "white" if player == BLACK else "black"
+    room_manager.add_move_event(room, target_color,
+                                result["board"], result["game_over"],
+                                result["winner"], result["current_player"])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/pvp/leave", methods=["GET", "POST"])
+def pvp_leave():
+    if request.method == "GET":
+        player_id = request.args.get("player_id")
+    else:
+        data = request.get_json()
+        player_id = data.get("player_id") if data else None
+    if not player_id:
+        return jsonify({"ok": False, "error": "参数缺失"})
+    room_manager.leave(player_id)
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
-    socketio.run(app, debug=True, port=5000)
+    app.run(debug=True, port=5000, threaded=True)
