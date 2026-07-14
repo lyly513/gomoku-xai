@@ -54,19 +54,157 @@ canvas {
   font-size: 12px;
   color: #666;
 }
+
+.overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: #1a1a2eee;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+.overlay.hidden { display: none; }
+
+.menu-card {
+  background: #16213e;
+  border: 1px solid #333;
+  border-radius: 12px;
+  padding: 32px 40px;
+  text-align: center;
+  min-width: 300px;
+}
+.menu-card h2 {
+  font-size: 22px;
+  margin-bottom: 20px;
+  color: #eee;
+}
+.menu-card p {
+  color: #999;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+.menu-card .btn-row {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.menu-card button {
+  padding: 12px 24px;
+  font-size: 16px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  background: #0f3460;
+  color: #eee;
+  transition: background 0.2s;
+}
+.menu-card button:hover { background: #1a1a5e; }
+.menu-card button.primary { background: #e94560; }
+.menu-card button.primary:hover { background: #c73e54; }
+.menu-card button.secondary { background: #16213e; border: 1px solid #444; }
+.menu-card button.secondary:hover { background: #1a1a2e; }
+.menu-card .back-link {
+  display: inline-block;
+  margin-top: 16px;
+  color: #888;
+  font-size: 13px;
+  cursor: pointer;
+}
+.menu-card .back-link:hover { color: #ccc; }
+.menu-card input {
+  width: 100%;
+  padding: 12px;
+  font-size: 20px;
+  text-align: center;
+  letter-spacing: 8px;
+  border: 2px solid #444;
+  border-radius: 8px;
+  background: #0d1b3e;
+  color: #eee;
+  outline: none;
+  margin-bottom: 16px;
+}
+.menu-card input:focus { border-color: #e94560; }
+.room-code {
+  font-size: 40px;
+  letter-spacing: 12px;
+  color: #ffd700;
+  font-weight: bold;
+  margin: 16px 0;
+  font-family: monospace;
+}
+.pvp-info {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  margin-bottom: 12px;
+}
+.pvp-player {
+  font-size: 16px;
+  padding: 6px 14px;
+  border-radius: 6px;
+}
+.pvp-player.black { background: #333; }
+.pvp-player.white { background: #ddd; color: #333; }
+.pvp-vs { font-size: 14px; color: #666; }
+.pvp-opponent { font-size: 14px; color: #aaa; margin-bottom: 8px; }
 </style>
 </head>
 <body>
 
 <h1>五子棋</h1>
+
 <div id="status"><span id="status-icon">●</span> 黑棋（你）的回合</div>
 <canvas id="board"></canvas>
-<div class="controls">
+<div class="controls" id="game-controls">
   <button class="primary" onclick="newGame()">新游戏</button>
   <button onclick="undoMove()">悔棋</button>
 </div>
 <div class="footer">点击棋盘落子 · 黑棋先手 · 五子连珠获胜</div>
 
+<!-- 主菜单 -->
+<div id="mode-select" class="overlay">
+  <div class="menu-card">
+    <h2>五子棋</h2>
+    <div class="btn-row">
+      <button class="primary" onclick="startAIMode()">🤖 AI 对战</button>
+      <button onclick="startPVPMode()">👥 在线对战</button>
+    </div>
+  </div>
+</div>
+
+<!-- 房间菜单 -->
+<div id="room-menu" class="overlay hidden">
+  <div class="menu-card">
+    <h2>在线对战</h2>
+    <div class="btn-row">
+      <button class="primary" onclick="createRoom()">创建房间</button>
+      <button class="secondary" onclick="showJoinUI()">加入房间</button>
+    </div>
+    <div id="join-ui" class="hidden" style="margin-top: 20px;">
+      <p>输入房间号</p>
+      <input id="room-input" type="text" maxlength="4" pattern="[0-9]{4}" placeholder="0000"
+             oninput="this.value=this.value.replace(/[^0-9]/g,'')">
+      <button class="primary" onclick="joinRoom()">加入</button>
+    </div>
+    <div class="back-link" onclick="backToModeSelect()">← 返回</div>
+  </div>
+</div>
+
+<!-- 等待页面 -->
+<div id="waiting" class="overlay hidden">
+  <div class="menu-card">
+    <p>将以下房间号分享给朋友</p>
+    <div class="room-code" id="waiting-room-code"></div>
+    <p>等待对手加入...</p>
+    <div class="back-link" onclick="leaveWaiting()">← 返回</div>
+  </div>
+</div>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
 const SIZE = 15;
 const CELL = 38;
@@ -77,6 +215,7 @@ const CANVAS_SIZE = PAD * 2 + CELL * (SIZE - 1);
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
+const controlsEl = document.getElementById('game-controls');
 
 let dpr = window.devicePixelRatio || 1;
 canvas.width = CANVAS_SIZE * dpr;
@@ -92,6 +231,13 @@ let hoverX = -1;
 let hoverY = -1;
 let pending = false;
 
+let gameMode = null;
+let myColor = 'black';
+let currentRoomId = null;
+
+const socket = io();
+
+// --- 画布绘制 ---
 function posToXY(col, row) {
   return [PAD + col * CELL, PAD + row * CELL];
 }
@@ -146,7 +292,6 @@ function drawBoard() {
 }
 
 function drawStones() {
-  let lastMove = null;
   for (let y = 0; y < SIZE; y++) {
     for (let x = 0; x < SIZE; x++) {
       if (boardState[y] && boardState[y][x] !== 0) {
@@ -183,10 +328,14 @@ function drawStone(col, row, stone, isLast) {
 }
 
 function drawHover() {
-  if (hoverX < 0 || hoverY < 0 || !boardState[hoverY] || boardState[hoverY][hoverX] !== 0 || gameOver || currentStone !== 'black') return;
+  const canClick = gameMode === 'ai'
+    ? (currentStone === 'black' && !gameOver && !pending)
+    : (!gameOver && !pending && myColor === currentStone);
+  if (!canClick || hoverX < 0 || hoverY < 0 || !boardState[hoverY] || boardState[hoverY][hoverX] !== 0) return;
+
   const [cx, cy] = posToXY(hoverX, hoverY);
   ctx.globalAlpha = 0.4;
-  ctx.fillStyle = '#000';
+  ctx.fillStyle = myColor === 'black' ? '#000' : '#ccc';
   ctx.beginPath();
   ctx.arc(cx, cy, RADIUS, 0, Math.PI * 2);
   ctx.fill();
@@ -207,16 +356,51 @@ function setStatusHtml(html) {
   statusEl.innerHTML = html;
 }
 
+function showOverlay(id) {
+  document.querySelectorAll('.overlay').forEach(el => el.classList.add('hidden'));
+  if (id) document.getElementById(id).classList.remove('hidden');
+}
+
+// --- UI 切换 ---
+function startAIMode() {
+  gameMode = 'ai';
+  myColor = 'black';
+  showOverlay(null);
+  controlsEl.innerHTML = `
+    <button class="primary" onclick="newGame()">新游戏</button>
+    <button onclick="undoMove()">悔棋</button>
+  `;
+  initAI();
+}
+
+function startPVPMode() {
+  gameMode = 'pvp';
+  showOverlay('room-menu');
+  document.getElementById('join-ui').classList.add('hidden');
+  document.getElementById('room-input').value = '';
+}
+
+function backToModeSelect() {
+  showOverlay('mode-select');
+}
+
+function showJoinUI() {
+  document.getElementById('join-ui').classList.remove('hidden');
+}
+
+// --- AI 模式 ---
 async function fetchJSON(url, opts) {
   const res = await fetch(url, opts);
   return res.json();
 }
 
-function applyState(data) {
-  if (!data.ok) {
-    alert(data.error);
-    return;
-  }
+async function initAI() {
+  const data = await fetchJSON('/api/state');
+  applyAIState(data);
+}
+
+function applyAIState(data) {
+  if (!data.ok) { alert(data.error); return; }
   boardState = data.board;
   currentStone = data.current_player;
   gameOver = data.game_over;
@@ -225,23 +409,126 @@ function applyState(data) {
     setStatusHtml(`<span class="win">${name} 获胜！</span>`);
   } else if (data.game_over) {
     setStatusHtml('<span class="win">平局！</span>');
-  } else if (data.message) {
-    setStatus(currentStone === 'black' ? '●' : '○', data.message);
   } else {
-    const name = currentStone === 'black' ? '黑棋（你）' : '白棋（AI）';
-    const icon = currentStone === 'black' ? '●' : '○';
-    setStatus(icon, `${name}的回合`);
+    setStatus('●', '黑棋（你）的回合');
   }
   render();
 }
 
-async function init() {
-  const data = await fetchJSON('/api/state');
-  applyState(data);
+async function undoMove() {
+  if (pending || gameMode !== 'ai') return;
+  const data = await fetchJSON('/api/undo', { method: 'POST' });
+  applyAIState(data);
 }
 
+async function newGame() {
+  if (pending || gameMode !== 'ai') return;
+  const data = await fetchJSON('/api/new-game', { method: 'POST' });
+  applyAIState(data);
+}
+
+// --- PvP 房间管理 ---
+function createRoom() {
+  socket.emit('room:create');
+}
+
+socket.on('room:created', (data) => {
+  currentRoomId = data.room_id;
+  document.getElementById('waiting-room-code').textContent = currentRoomId;
+  showOverlay('waiting');
+});
+
+function joinRoom() {
+  const input = document.getElementById('room-input');
+  const rid = input.value.trim();
+  if (rid.length !== 4) {
+    alert('请输入4位数字房间号');
+    return;
+  }
+  socket.emit('room:join', { room_id: rid });
+}
+
+function leaveWaiting() {
+  socket.disconnect();
+  socket.connect();
+  currentRoomId = null;
+  showOverlay('room-menu');
+}
+
+socket.on('game:error', (data) => {
+  alert(data.message);
+});
+
+// --- PvP 游戏流程 ---
+socket.on('game:start', (data) => {
+  currentRoomId = data.room_id || currentRoomId;
+  myColor = data.color;
+  boardState = data.board;
+  currentStone = data.current_player;
+  gameOver = false;
+  pending = false;
+
+  const colorName = myColor === 'black' ? '● 黑棋' : '○ 白棋';
+  const colorCls = myColor;
+  const opponent = myColor === 'black' ? '○ 白棋' : '● 黑棋';
+
+  setStatus('●', `你执${colorName}，对手执${opponent}`);
+  controlsEl.innerHTML = '';
+
+  showOverlay(null);
+
+  controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
+  render();
+});
+
+socket.on('game:moved', (data) => {
+  boardState = data.board;
+  gameOver = data.game_over;
+  currentStone = data.current_player;
+  pending = false;
+
+  if (data.winner) {
+    const winName = data.winner === 'black' ? '● 黑棋' : '○ 白棋';
+    const youWin = data.winner === myColor;
+    if (youWin) {
+      setStatusHtml(`<span class="win">${winName}（你）获胜！</span>`);
+    } else {
+      setStatusHtml(`<span class="win">${winName}（对手）获胜！</span>`);
+    }
+    controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
+  } else if (data.game_over) {
+    setStatusHtml('<span class="win">平局！</span>');
+    controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
+  } else {
+    const turn = myColor === currentStone ? '你的回合' : '对手回合';
+    const icon = currentStone === 'black' ? '●' : '○';
+    const colorName = currentStone === 'black' ? '黑棋' : '白棋';
+    setStatus(icon, `${colorName} - ${turn}`);
+  }
+  render();
+});
+
+socket.on('room:opponent_left', () => {
+  gameOver = true;
+  setStatusHtml('<span class="win">对手已离开</span>');
+  controlsEl.innerHTML = `<button onclick="leaveGame()">退出对局</button>`;
+  render();
+});
+
+function leaveGame() {
+  socket.disconnect();
+  socket.connect();
+  currentRoomId = null;
+  gameMode = null;
+  myColor = 'black';
+  boardState = [];
+  gameOver = false;
+  showOverlay('mode-select');
+}
+
+// --- 点击落子 ---
 async function handleClick(e) {
-  if (gameOver || currentStone !== 'black' || pending) return;
+  if (gameOver || pending) return;
 
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
@@ -264,22 +551,31 @@ async function handleClick(e) {
 
   if (bestCol < 0 || !boardState[bestYIdx] || boardState[bestYIdx][bestCol] !== 0) return;
 
-  pending = true;
-  setStatus('⏳', '你落子中...');
-  render();
-
-  const data = await fetchJSON('/api/move', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ x: bestCol, y: bestYIdx }),
-  });
-
-  pending = false;
-  applyState(data);
+  if (gameMode === 'pvp') {
+    if (myColor !== currentStone) return;
+    pending = true;
+    render();
+    socket.emit('game:move', { x: bestCol, y: bestYIdx });
+  } else {
+    if (currentStone !== 'black') return;
+    pending = true;
+    setStatus('⏳', '你落子中...');
+    render();
+    const data = await fetchJSON('/api/move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: bestCol, y: bestYIdx }),
+    });
+    pending = false;
+    applyAIState(data);
+  }
 }
 
 function handleCanvasMove(e) {
-  if (gameOver || currentStone !== 'black') { hoverX = -1; hoverY = -1; render(); return; }
+  const canHover = gameMode === 'ai'
+    ? (currentStone === 'black' && !gameOver && !pending)
+    : (!gameOver && !pending && myColor === currentStone);
+  if (!canHover) { hoverX = -1; hoverY = -1; render(); return; }
 
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
@@ -307,37 +603,17 @@ function handleCanvasMove(e) {
       render();
     }
   } else {
-    if (hoverX !== -1) {
-      hoverX = -1;
-      hoverY = -1;
-      render();
-    }
+    if (hoverX !== -1) { hoverX = -1; hoverY = -1; render(); }
   }
 }
 
-function handleCanvasLeave() {
-  hoverX = -1;
-  hoverY = -1;
-  render();
-}
+function handleCanvasLeave() { hoverX = -1; hoverY = -1; render(); }
 
 canvas.addEventListener('click', handleClick);
 canvas.addEventListener('mousemove', handleCanvasMove);
 canvas.addEventListener('mouseleave', handleCanvasLeave);
 
-async function undoMove() {
-  if (pending) return;
-  const data = await fetchJSON('/api/undo', { method: 'POST' });
-  applyState(data);
-}
-
-async function newGame() {
-  if (pending) return;
-  const data = await fetchJSON('/api/new-game', { method: 'POST' });
-  applyState(data);
-}
-
-init();
+showOverlay('mode-select');
 </script>
 </body>
 </html>

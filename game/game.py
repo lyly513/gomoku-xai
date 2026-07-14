@@ -73,6 +73,30 @@ class Game:
         self.current_player = BLACK
         return self._state("")
 
+    def pvp_move(self, x, y, player):
+        if self.game_over:
+            return {"ok": False, "error": "游戏已结束"}
+        if self.current_player != player:
+            return {"ok": False, "error": "当前不是你的回合"}
+        if not self.board.is_valid(x, y):
+            return {"ok": False, "error": "该位置无效或已有棋子"}
+
+        stone_name = "black" if player == BLACK else "white"
+        self.board.set(x, y, player)
+        self.history.append({"x": x, "y": y, "stone": stone_name})
+
+        if self._check_win(x, y, player):
+            self.game_over = True
+            self.winner = stone_name
+            return self._state(f"{stone_name} 获胜！")
+
+        if self.board.is_full():
+            self.game_over = True
+            return self._state("平局！")
+
+        self.current_player = WHITE if player == BLACK else BLACK
+        return self._state("")
+
     def undo(self):
         if self.game_over or not self.history:
             return {"ok": False, "error": "没有可以悔棋的步骤"}
